@@ -1,0 +1,57 @@
+{
+  "luci-app-skywifi": {
+    "description": "Grant full permissions for skywifi RPC calls and UCI settings",
+    "read": {
+      "ubus": {
+        "luci.skywifi": [
+          "get_devices",
+          "get_stats",
+          "get_history",
+          "get_qos_status",
+          "get_netinfo",
+          "get_url_block_status",
+          "skywifi_status",
+          "skywifi_admin_check",
+          "skywifi_master_check",
+          "skywifi_list_vouchers",
+          "skywifi_device_status"
+        ]
+      },
+      "uci": [
+        "skywifi"
+      ]
+    },
+    "write": {
+      "ubus": {
+        "luci.skywifi": [
+          "reset_stats",
+          "apply_qos",
+          "set_qos_enabled",
+          "toggle_qos_rule",
+          "toggle_block",
+          "set_quota",
+          "set_device_name",
+          "add_blocked_domain",
+          "delete_blocked_domain",
+          "toggle_blocked_domain",
+          "apply_url_block",
+          "set_antibypass_options",
+          "add_vpn_block_device",
+          "delete_vpn_block_device",
+          "toggle_vpn_block_device",
+          "toggle_engine",
+          "skywifi_generate",
+          "skywifi_revoke",
+          "skywifi_admin_set",
+          "skywifi_master_set",
+          "skywifi_set_enabled",
+          "skywifi_forget_device",
+          "skywifi_reset"
+        ]
+      },
+      "uci": [
+        "skywifi"
+      ]
+    }
+  }
+}

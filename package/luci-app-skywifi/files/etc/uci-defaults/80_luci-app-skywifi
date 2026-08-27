@@ -1,0 +1,90 @@
+#!/bin/sh
+# UCI defaults script for luci-app-skywifi
+
+if [ ! -e /etc/config/skywifi ]; then
+	touch /etc/config/skywifi
+	uci batch <<EOF
+set skywifi.global=global
+set skywifi.global.enabled='1'
+set skywifi.global.wan_interface='wan'
+set skywifi.global.lan_interface='br-lan'
+set skywifi.global.poll_interval='1'
+set skywifi.global.sync_interval='5m'
+set skywifi.global.storage_path='/etc/skywifi/history'
+set skywifi.global.sync_on_shutdown='1'
+set skywifi.global.show_temp='1'
+set skywifi.global.show_swap='1'
+set skywifi.global.portal_enabled='0'
+set skywifi.global.portal_ip='192.168.1.1'
+set skywifi.global.portal_port='8080'
+set skywifi.global.voucher_days='30'
+set skywifi.global.business_name='Sky Wifi'
+set skywifi.global.owner_name='Yeasin Arafat'
+set skywifi.global.owner_mobile='01650121954'
+set skywifi.global.support_number='01650121954'
+set skywifi.global.contract_reference='01650121954'
+set skywifi.global.admin_password_hash=''
+set skywifi.global.master_password_hash=''
+	set skywifi.qos=qos
+	set skywifi.qos.enabled='1'
+	set skywifi.blocker=blocker
+	set skywifi.blocker.force_local_dns='1'
+	set skywifi.blocker.block_encrypted_dns='1'
+	set skywifi.blocker.tls_sni_filtering='1'
+	commit skywifi
+EOF
+else
+	# Non-destructive: populate missing global & blocker options
+	[ -z "$(uci -q get skywifi.global)" ] && uci set skywifi.global=global 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.enabled)" ] && uci set skywifi.global.enabled='1' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.wan_interface)" ] && uci set skywifi.global.wan_interface='wan' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.lan_interface)" ] && uci set skywifi.global.lan_interface='br-lan' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.poll_interval)" ] && uci set skywifi.global.poll_interval='1' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.sync_interval)" ] && uci set skywifi.global.sync_interval='5m' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.storage_path)" ] && uci set skywifi.global.storage_path='/etc/skywifi/history' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.sync_on_shutdown)" ] && uci set skywifi.global.sync_on_shutdown='1' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.show_temp)" ] && uci set skywifi.global.show_temp='1' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.global.show_swap)" ] && uci set skywifi.global.show_swap='1' 2>/dev/null || true
+[ -z "$(uci -q get skywifi.global.portal_enabled)" ] && uci set skywifi.global.portal_enabled='0' 2>/dev/null || true
+[ -z "$(uci -q get skywifi.global.portal_ip)" ] && uci set skywifi.global.portal_ip='192.168.1.1' 2>/dev/null || true
+[ -z "$(uci -q get skywifi.global.portal_port)" ] && uci set skywifi.global.portal_port='8080' 2>/dev/null || true
+[ -z "$(uci -q get skywifi.global.voucher_days)" ] && uci set skywifi.global.voucher_days='30' 2>/dev/null || true
+
+	[ -z "$(uci -q get skywifi.qos)" ] && uci set skywifi.qos=qos 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.qos.enabled)" ] && uci set skywifi.qos.enabled='1' 2>/dev/null || true
+
+	[ -z "$(uci -q get skywifi.blocker)" ] && uci set skywifi.blocker=blocker 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.blocker.force_local_dns)" ] && uci set skywifi.blocker.force_local_dns='1' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.blocker.block_encrypted_dns)" ] && uci set skywifi.blocker.block_encrypted_dns='1' 2>/dev/null || true
+	[ -z "$(uci -q get skywifi.blocker.tls_sni_filtering)" ] && uci set skywifi.blocker.tls_sni_filtering='1' 2>/dev/null || true
+	uci del skywifi.blocker.block_commercial_vpn 2>/dev/null || true
+	uci del skywifi.blocker.anti_vpn 2>/dev/null || true
+	uci del skywifi.blocker.anti_vpn_mac 2>/dev/null || true
+
+	uci del skywifi.global.sync_interval_minutes 2>/dev/null || true
+	uci del skywifi.global.history_retention_days 2>/dev/null || true
+	uci del skywifi.global.unit 2>/dev/null || true
+	uci commit skywifi 2>/dev/null || true
+fi
+
+# Register service in ucitrack so LuCI Save & Apply reloads skywifi
+uci -q get ucitrack.@skywifi[0] >/dev/null || {
+	uci add ucitrack skywifi 2>/dev/null || true
+	uci set ucitrack.@skywifi[-1].init='skywifi' 2>/dev/null || true
+	uci commit ucitrack 2>/dev/null || true
+}
+
+# Remove legacy cron.d files
+rm -f /etc/cron.d/skywifi 2>/dev/null || true
+
+# Ensure executables have correct permissions
+chmod +x /usr/libexec/rpcd/luci.skywifi 2>/dev/null || true
+chmod +x /usr/libexec/skywifi/*.sh 2>/dev/null || true
+chmod +x /etc/init.d/skywifi 2>/dev/null || true
+
+# Enable and restart skywifi init service & rpcd daemon
+/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+/etc/init.d/skywifi enable >/dev/null 2>&1 || true
+/etc/init.d/skywifi restart >/dev/null 2>&1 || true
+
+exit 0

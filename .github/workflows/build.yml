@@ -1,0 +1,94 @@
+name: Build Sky Wifi package (OpenWrt 25.12.5)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with OpenWrt 25.12.5 SDK (Archer C6 v3.2 / ramips mt7621)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_URL='https://downloads.openwrt.org/releases/25.12.5/targets/ramips/mt7621/openwrt-sdk-25.12.5-ramips-mt7621_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 --max-time 1800 "$SDK_URL" -o sdk.tar.zst
+          tar --use-compress-program=unzstd -xf sdk.tar.zst
+          SDK_DIR="$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' -print -quit)"
+          test -n "$SDK_DIR"
+
+          rm -rf "$SDK_DIR/package/luci-app-skywifi"
+          cp -a package/luci-app-skywifi "$SDK_DIR/package/"
+          cd "$SDK_DIR"
+
+          # SDK package builds do not need a full feeds update. The Sky Wifi
+          # package is files-only and has no source compilation step.
+          make defconfig
+          make package/luci-app-skywifi/clean V=s
+          make package/luci-app-skywifi/compile V=s -j2
+
+          APK="$(find bin/packages -type f -name 'luci-app-skywifi-*.apk' -print -quit)"
+          test -n "$APK"
+          test -s "$APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp -v "$APK" "$GITHUB_WORKSPACE/dist/"
+          sha256sum "$GITHUB_WORKSPACE/dist/"*.apk | tee "$GITHUB_WORKSPACE/dist/SHA256SUMS"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: Static validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # GitHub/Windows ZIP extraction can lose executable mode bits.
+          # Normalize runtime script permissions before syntax/permission checks.
+          find package/luci-app-skywifi/files/etc/init.d \
+               package/luci-app-skywifi/files/etc/uci-defaults \
+               package/luci-app-skywifi/files/usr/libexec \
+               package/luci-app-skywifi/files/usr/libexec/rpcd \
+               package/luci-app-skywifi/files/www/cgi-bin \
+               -type f -exec chmod 0755 {} +
+
+          find package/luci-app-skywifi/files -type f \
+            \( -name '*.sh' -o -path '*/cgi-bin/*' -o -path '*/init.d/*' -o -name 'luci.skywifi' \) \
+            -print0 | xargs -0 -r -n1 sh -n
+
+          node --check package/luci-app-skywifi/files/www/luci-static/resources/view/skywifi/admin.js
+          node --check package/luci-app-skywifi/files/www/luci-static/resources/view/skywifi/vouchers.js
+          node --check package/luci-app-skywifi/files/www/luci-static/resources/view/skywifi/dashboard.js
+          test -x package/luci-app-skywifi/files/etc/init.d/skywifi
+          test -x package/luci-app-skywifi/files/www/cgi-bin/skywifi/portal
+          test -x package/luci-app-skywifi/files/www/cgi-bin/skywifi/terms
+
+      - name: Validate generated package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find dist -type f -name 'luci-app-skywifi-*.apk' -print -quit)"
+          test -s "$APK"
+          file "$APK"
+          sha256sum "$APK"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skywifi-v2-package
+          path: dist/*
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

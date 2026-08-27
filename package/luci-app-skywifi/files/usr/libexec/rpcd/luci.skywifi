@@ -1,0 +1,538 @@
+#!/bin/sh
+# RPCD Executable Plugin for luci-app-skywifi
+# Exposes UBUS methods for the LuCI frontend. Reads are served from the
+# daemon's cached snapshot for speed; writes are delegated to the engines.
+
+HELPER="/usr/libexec/skywifi/netmon-helper.sh"
+QOS="/usr/libexec/skywifi/qos-engine.sh"
+ARCHIVER="/usr/libexec/skywifi/stats-archiver.sh"
+NETINFO="/usr/libexec/skywifi/netmon-netinfo.sh"
+URLBLOCK="/usr/libexec/skywifi/urlblock-engine.sh"
+
+sha256() { printf '%s' "$1" | sha256sum 2>/dev/null | cut -d" " -f1; }
+get_hash() { uci -q get skywifi.global."$1"_password_hash; }
+check_hash() { expected=$(get_hash "$1"); [ -n "$expected" ] || return 2; actual=$(sha256 "$2"); [ -n "$actual" ] && [ "$actual" = "$expected" ]; }
+read_param() { input="$1"; key="$2"; val=""; if command -v jsonfilter >/dev/null 2>&1; then val=$(printf '%s' "$input" | jsonfilter -e "@.$key" 2>/dev/null); fi; [ -z "$val" ] && val=$(printf '%s' "$input" | grep -o "\"$key\"[ ]*:[ ]*\"[^\"]*\"" | cut -d'\"' -f4); printf '%s' "$val"; }
+require_admin() { [ -n "$(get_hash admin)" ] || return 3; check_hash admin "$1"; }
+
+case "$1" in
+	list)
+		echo '{'
+		echo '  "get_devices": {},'
+		echo '  "get_stats": {},'
+		echo '  "get_history": { "range": "str" },'
+		echo '  "get_qos_status": {},'
+		echo '  "get_netinfo": {},'
+		echo '  "get_url_block_status": {},'
+		echo '  "reset_stats": { "target": "str" },'
+		echo '  "apply_qos": {},'
+		echo '  "set_qos_enabled": { "enabled": "str" },'
+		echo '  "toggle_qos_rule": { "section": "str", "enabled": "str" },'
+		echo '  "toggle_block": { "target": "str", "block": "str", "password": "str" },'
+		echo '  "set_quota": { "target_mac": "str", "target_ip": "str", "quota_bytes": "str" },'
+		echo '  "set_device_name": { "target_mac": "str", "name": "str" },'
+		echo '  "apply_url_block": {},'
+		echo '  "add_blocked_domain": { "domain": "str", "mac": "str", "category": "str" },'
+		echo '  "delete_blocked_domain": { "section": "str" },'
+		echo '  "toggle_blocked_domain": { "section": "str", "enabled": "str" },'
+		echo '  "set_antibypass_options": { "force_local_dns": "str", "block_encrypted_dns": "str", "tls_sni_filtering": "str" },'
+		echo '  "add_vpn_block_device": { "mac": "str" },'
+		echo '  "delete_vpn_block_device": { "mac": "str" },'
+		echo '  "toggle_vpn_block_device": { "mac": "str", "enabled": "str" },'
+		echo '  "skywifi_status": {},'
+		echo '  "skywifi_list_vouchers": { "password": "str" },'
+		echo '  "skywifi_generate": { "count": "str", "validity": "str", "password": "str" },'
+		echo '  "skywifi_revoke": { "code": "str", "password": "str" },'
+		echo '  "skywifi_admin_set": { "password": "str", "master": "str" },'
+		echo '  "skywifi_admin_check": { "password": "str" },'
+		echo '  "skywifi_master_set": { "password": "str", "master": "str" },'
+		echo '  "skywifi_master_check": { "password": "str" },'
+		echo '  "skywifi_set_enabled": { "enabled": "str", "password": "str" },'
+		echo '  "skywifi_device_status": { "mac": "str", "password": "str" },'
+		echo '  "skywifi_forget_device": { "mac": "str", "password": "str" },'
+			echo '  "skywifi_reset": { "password": "str" }'
+		echo '}'
+		;;
+	call)
+		case "$2" in
+			get_devices)
+				if [ -x "$HELPER" ]; then
+					"$HELPER" devices
+				else
+					echo '{"error":"helper_missing"}'
+				fi
+				;;
+			get_stats)
+				if [ -x "$HELPER" ]; then
+					"$HELPER" stats
+				else
+					echo '{"error":"helper_missing"}'
+				fi
+				;;
+			get_history)
+				input=$(cat 2>/dev/null)
+				range=$(echo "$input" | grep -o '"range"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				range=${range:-today}
+				if [ -x "$ARCHIVER" ]; then
+					"$ARCHIVER" get "$range"
+				else
+					echo '{"error":"archiver_missing"}'
+				fi
+				;;
+			get_qos_status)
+				if [ -x "$QOS" ]; then
+					"$QOS" status
+				else
+					echo '{"error":"qos_engine_missing"}'
+				fi
+				;;
+			get_netinfo)
+				if [ -x "$NETINFO" ]; then
+					"$NETINFO"
+				else
+					echo '{"error":"netinfo_missing"}'
+				fi
+				;;
+			get_url_block_status)
+				if [ -x "$URLBLOCK" ]; then
+					"$URLBLOCK" status
+				else
+					echo '{"error":"urlblock_engine_missing"}'
+				fi
+				;;
+			reset_stats)
+				input=$(cat 2>/dev/null)
+				target=$(echo "$input" | grep -o '"target"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				target=${target:-all}
+				if [ -x "$ARCHIVER" ]; then
+					"$ARCHIVER" reset "$target"
+				else
+					echo '{"error":"archiver_missing"}'
+				fi
+				;;
+			apply_qos)
+				if [ -x "$QOS" ]; then
+					"$QOS" apply
+				else
+					echo '{"error":"qos_engine_missing"}'
+				fi
+				;;
+			set_qos_enabled)
+				input=$(cat 2>/dev/null)
+				enabled=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					enabled=$(echo "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
+				fi
+				[ -z "$enabled" ] && enabled=$(echo "$input" | grep -o '"enabled"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$(uci -q get skywifi.qos)" ] && uci set skywifi.qos=qos
+				if [ "$enabled" = "1" ] || [ "$enabled" = "true" ]; then
+					uci set skywifi.qos.enabled='1'
+				else
+					uci set skywifi.qos.enabled='0'
+				fi
+				uci commit skywifi
+				if [ -x "$QOS" ]; then
+					"$QOS" apply
+				else
+					echo '{"status":"ok"}'
+				fi
+				;;
+			toggle_qos_rule)
+				input=$(cat 2>/dev/null)
+				section=""
+				enabled=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					section=$(echo "$input" | jsonfilter -e '@.section' 2>/dev/null)
+					enabled=$(echo "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
+				fi
+				[ -z "$section" ] && section=$(echo "$input" | grep -o '"section"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$enabled" ] && enabled=$(echo "$input" | grep -o '"enabled"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$section" ]; then
+					if [ "$enabled" = "1" ] || [ "$enabled" = "true" ]; then
+						uci set skywifi."$section".enabled='1'
+					else
+						uci set skywifi."$section".enabled='0'
+					fi
+					uci commit skywifi
+					if [ -x "$QOS" ]; then
+						"$QOS" apply
+					else
+						echo '{"status":"ok"}'
+					fi
+				else
+					echo '{"error":"missing_section"}'
+				fi
+				;;
+			apply_url_block)
+				if [ -x "$URLBLOCK" ]; then
+					"$URLBLOCK" apply
+				else
+					echo '{"error":"urlblock_engine_missing"}'
+				fi
+				;;
+			add_blocked_domain)
+				input=$(cat 2>/dev/null)
+				domain=""
+				mac=""
+				category=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					domain=$(echo "$input" | jsonfilter -e '@.domain' 2>/dev/null)
+					[ -z "$domain" ] && domain=$(echo "$input" | jsonfilter -e '@[0]' 2>/dev/null)
+					mac=$(echo "$input" | jsonfilter -e '@.mac' 2>/dev/null)
+					[ -z "$mac" ] && mac=$(echo "$input" | jsonfilter -e '@[1]' 2>/dev/null)
+					category=$(echo "$input" | jsonfilter -e '@.category' 2>/dev/null)
+					[ -z "$category" ] && category=$(echo "$input" | jsonfilter -e '@[2]' 2>/dev/null)
+				fi
+				[ -z "$domain" ] && domain=$(echo "$input" | grep -o '"domain"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$mac" ] && mac=$(echo "$input" | grep -o '"mac"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$category" ] && category=$(echo "$input" | grep -o '"category"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+
+				mac=${mac:-all}
+				category=${category:-custom}
+
+				if [ -n "$domain" ]; then
+					sec=$(uci add skywifi block_domain)
+					uci set skywifi."$sec".domain="$domain"
+					uci set skywifi."$sec".enabled='1'
+					uci set skywifi."$sec".mac="$mac"
+					uci set skywifi."$sec".category="$category"
+					uci commit skywifi
+					[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_domain"}'
+				fi
+				;;
+			delete_blocked_domain)
+				input=$(cat 2>/dev/null)
+				section=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					section=$(echo "$input" | jsonfilter -e '@.section' 2>/dev/null)
+				fi
+				[ -z "$section" ] && section=$(echo "$input" | grep -o '"section"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$section" ]; then
+					uci delete skywifi."$section" 2>/dev/null || true
+					uci commit skywifi
+					[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_section"}'
+				fi
+				;;
+			toggle_blocked_domain)
+				input=$(cat 2>/dev/null)
+				section=""
+				enabled=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					section=$(echo "$input" | jsonfilter -e '@.section' 2>/dev/null)
+					enabled=$(echo "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
+				fi
+				[ -z "$section" ] && section=$(echo "$input" | grep -o '"section"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$enabled" ] && enabled=$(echo "$input" | grep -o '"enabled"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$section" ]; then
+					if [ "$enabled" = "1" ] || [ "$enabled" = "true" ]; then
+						uci set skywifi."$section".enabled='1'
+					else
+						uci set skywifi."$section".enabled='0'
+					fi
+					uci commit skywifi
+					[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_section"}'
+				fi
+				;;
+			set_antibypass_options)
+				input=$(cat 2>/dev/null)
+				force_local_dns=""
+				block_encrypted_dns=""
+				tls_sni_filtering=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					force_local_dns=$(echo "$input" | jsonfilter -e '@.force_local_dns' 2>/dev/null)
+					block_encrypted_dns=$(echo "$input" | jsonfilter -e '@.block_encrypted_dns' 2>/dev/null)
+					tls_sni_filtering=$(echo "$input" | jsonfilter -e '@.tls_sni_filtering' 2>/dev/null)
+				fi
+				[ -z "$force_local_dns" ] && force_local_dns=$(echo "$input" | grep -o '"force_local_dns"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$block_encrypted_dns" ] && block_encrypted_dns=$(echo "$input" | grep -o '"block_encrypted_dns"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$tls_sni_filtering" ] && tls_sni_filtering=$(echo "$input" | grep -o '"tls_sni_filtering"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+
+				[ -z "$(uci -q get skywifi.blocker)" ] && uci set skywifi.blocker=blocker
+				[ -n "$force_local_dns" ] && uci set skywifi.blocker.force_local_dns="$force_local_dns"
+				[ -n "$block_encrypted_dns" ] && uci set skywifi.blocker.block_encrypted_dns="$block_encrypted_dns"
+				[ -n "$tls_sni_filtering" ] && uci set skywifi.blocker.tls_sni_filtering="$tls_sni_filtering"
+				uci del skywifi.blocker.block_commercial_vpn 2>/dev/null || true
+
+				uci commit skywifi
+				[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+				echo '{"status":"ok"}'
+				;;
+			add_vpn_block_device)
+				input=$(cat 2>/dev/null)
+				mac=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					mac=$(echo "$input" | jsonfilter -e '@.mac' 2>/dev/null)
+					[ -z "$mac" ] && mac=$(echo "$input" | jsonfilter -e '@[0]' 2>/dev/null)
+				fi
+				[ -z "$mac" ] && mac=$(echo "$input" | grep -o '"mac"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$mac" ]; then
+					sec="vpn_block_$(echo "$mac" | tr -cd 'a-zA-Z0-9')"
+					uci set skywifi."$sec"=vpn_block
+					uci set skywifi."$sec".mac="$mac"
+					uci set skywifi."$sec".enabled='1'
+					uci commit skywifi
+					[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_mac"}'
+				fi
+				;;
+			toggle_vpn_block_device)
+				input=$(cat 2>/dev/null)
+				mac=""
+				enabled=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					mac=$(echo "$input" | jsonfilter -e '@.mac' 2>/dev/null)
+					[ -z "$mac" ] && mac=$(echo "$input" | jsonfilter -e '@[0]' 2>/dev/null)
+					enabled=$(echo "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
+					[ -z "$enabled" ] && enabled=$(echo "$input" | jsonfilter -e '@[1]' 2>/dev/null)
+				fi
+				[ -z "$mac" ] && mac=$(echo "$input" | grep -o '"mac"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				[ -z "$enabled" ] && enabled=$(echo "$input" | grep -o '"enabled"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$mac" ]; then
+					sec="vpn_block_$(echo "$mac" | tr -cd 'a-zA-Z0-9')"
+					if [ "$enabled" = "1" ] || [ "$enabled" = "true" ]; then
+						uci set skywifi."$sec".enabled='1'
+					else
+						uci set skywifi."$sec".enabled='0'
+					fi
+					uci commit skywifi
+					[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_mac"}'
+				fi
+				;;
+			delete_vpn_block_device)
+				input=$(cat 2>/dev/null)
+				mac=""
+				if command -v jsonfilter >/dev/null 2>&1; then
+					mac=$(echo "$input" | jsonfilter -e '@.mac' 2>/dev/null)
+					[ -z "$mac" ] && mac=$(echo "$input" | jsonfilter -e '@[0]' 2>/dev/null)
+				fi
+				[ -z "$mac" ] && mac=$(echo "$input" | grep -o '"mac"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$mac" ]; then
+					sec="vpn_block_$(echo "$mac" | tr -cd 'a-zA-Z0-9')"
+					uci delete skywifi."$sec" 2>/dev/null || true
+					uci commit skywifi
+					[ -x "$URLBLOCK" ] && "$URLBLOCK" apply >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_mac"}'
+				fi
+				;;
+			toggle_block)
+				input=$(cat 2>/dev/null)
+				target=$(echo "$input" | grep -o '"target"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				block=$(echo "$input" | grep -o '"block"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				password=$(read_param "$input" password)
+				require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }
+				if [ -n "$target" ]; then
+					sec_name="quick_block_$(echo "$target" | tr -cd 'a-zA-Z0-9')"
+					if [ "$block" = "1" ] || [ "$block" = "true" ]; then
+						uci set skywifi."$sec_name"=qos_rule
+						uci set skywifi."$sec_name".enabled='1'
+						uci set skywifi."$sec_name".block='1'
+						if echo "$target" | grep -q ':'; then
+							uci set skywifi."$sec_name".mac="$target"
+						else
+							uci set skywifi."$sec_name".target="$target"
+						fi
+					else
+						uci delete skywifi."$sec_name" 2>/dev/null || true
+					fi
+					uci commit skywifi
+					if [ -x "$QOS" ]; then
+						"$QOS" apply >/dev/null 2>&1 || true
+					fi
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_target"}'
+				fi
+				;;
+			set_quota)
+				input=$(cat 2>/dev/null)
+				target_mac=$(echo "$input" | grep -o '"target_mac"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				target_ip=$(echo "$input" | grep -o '"target_ip"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				quota_bytes=$(echo "$input" | grep -o '"quota_bytes"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				quota_val=$(echo "$input" | grep -o '"quota_val"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				quota_unit=$(echo "$input" | grep -o '"quota_unit"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				reset_cycle=$(echo "$input" | grep -o '"reset_cycle"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+
+				sec_name="rule_$(echo "${target_mac:-$target_ip}" | tr -cd 'a-zA-Z0-9')"
+				if [ -n "$quota_bytes" ] && [ "$quota_bytes" -gt 0 ] 2>/dev/null; then
+					uci set skywifi."$sec_name"=qos_rule
+					uci set skywifi."$sec_name".enabled='1'
+					[ -n "$target_mac" ] && uci set skywifi."$sec_name".mac="$target_mac"
+					[ -n "$target_ip" ] && uci set skywifi."$sec_name".target="$target_ip"
+					uci set skywifi."$sec_name".quota_bytes="$quota_bytes"
+					[ -n "$quota_val" ] && uci set skywifi."$sec_name".quota_val="$quota_val"
+					[ -n "$quota_unit" ] && uci set skywifi."$sec_name".quota_unit="$quota_unit"
+					[ -n "$reset_cycle" ] && uci set skywifi."$sec_name".reset_cycle="$reset_cycle"
+				else
+					has_down=$(uci -q get skywifi."$sec_name".max_down)
+					if [ -z "$has_down" ] || [ "$has_down" = "0" ]; then
+						uci delete skywifi."$sec_name" 2>/dev/null || true
+					else
+						uci delete skywifi."$sec_name".quota_bytes 2>/dev/null || true
+						uci delete skywifi."$sec_name".quota_val 2>/dev/null || true
+						uci delete skywifi."$sec_name".quota_unit 2>/dev/null || true
+					fi
+				fi
+				uci commit skywifi
+				if [ -x "$QOS" ]; then
+					"$QOS" apply >/dev/null 2>&1 || true
+				fi
+				echo '{"status":"ok"}'
+				;;
+			set_device_name)
+				input=$(cat 2>/dev/null)
+				target_mac=$(echo "$input" | grep -o '"target_mac"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				name=$(echo "$input" | grep -o '"name"[ ]*:[ ]*"[^"]*"' | cut -d'"' -f4)
+				if [ -n "$target_mac" ]; then
+					m12=$(echo "$target_mac" | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')
+					sec_name="alias_${m12}"
+					if [ -n "$name" ]; then
+						uci set skywifi."$sec_name"=device_name
+						uci set skywifi."$sec_name".mac="$(echo "$target_mac" | tr '[:upper:]' '[:lower:]')"
+						uci set skywifi."$sec_name".name="$name"
+					else
+						uci delete skywifi."$sec_name" 2>/dev/null || true
+					fi
+					uci commit skywifi
+					[ -x "$HELPER" ] && "$HELPER" sync >/dev/null 2>&1 || true
+					echo '{"status":"ok"}'
+				else
+					echo '{"error":"missing_mac"}'
+				fi
+				;;
+			skywifi_status)
+				if [ -x /usr/libexec/skywifi/skywifi.sh ]; then /usr/libexec/skywifi/skywifi.sh status; else echo '{"error":"skywifi_missing"}'; fi
+				;;
+			skywifi_list_vouchers)
+				input=$(cat 2>/dev/null); password=$(read_param "$input" password)
+				if [ -n "$(get_hash admin)" ]; then require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }; fi
+				VOUCHERS=/etc/skywifi/vouchers.db
+				CUSTOMERS=/etc/skywifi/customers.db
+				nowv=$(date +%s)
+				awk -F '\t' -v now="$nowv" '
+				function esc(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\"", v); gsub(/\r/, "", v); gsub(/\n/, "", v); return v }
+				NR==FNR { if ($1!="") { cname[$1]=$2; cmobile[$1]=$3 }; next }
+				BEGIN{printf "{\"status\":\"ok\",\"vouchers\":["}
+				{
+					if ($1=="") next; state=$2; if (state=="ACTIVE" && $6>0 && $6<=now) state="EXPIRED";
+					if (n++) printf ",";
+					name=(cname[$7] ? cname[$7] : ""); mobile=(cmobile[$7] ? cmobile[$7] : ""); device=($8=="-" ? "" : $8);
+					printf "{\"code\":\"%s\",\"state\":\"%s\",\"plan\":\"%s\",\"created\":%s,\"activated\":%s,\"expires\":%s,\"customer\":\"%s\",\"mobile\":\"%s\",\"device\":\"%s\"}", esc($1),esc(state),esc($4),($3==""?0:$3),($5==""?0:$5),($6==""?0:$6),esc(name),esc(mobile),esc(device)
+				}
+				END{print "]}"}' "$CUSTOMERS" "$VOUCHERS" 2>/dev/null
+				;;
+
+			skywifi_generate)
+				input=$(cat 2>/dev/null); count=$(read_param "$input" count); validity=$(read_param "$input" validity); password=$(read_param "$input" password)
+				count=${count:-1}; validity=${validity:-30d}
+				if [ -n "$(get_hash admin)" ]; then require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }; fi
+				case "$validity" in lifetime|30d) ;; *) validity=30d;; esac
+				if [ -x /usr/libexec/skywifi/skywifi.sh ]; then
+					codes=$(/usr/libexec/skywifi/skywifi.sh generate "$count" "$validity")
+					printf '%s\n' "$codes" | awk 'BEGIN{printf "{\"status\":\"ok\",\"codes\":["} {if(NR>1)printf ","; printf "\"%s\"",$0} END{print "]}"}'
+				else echo '{"error":"skywifi_missing"}'; fi
+				;;
+			skywifi_revoke)
+				input=$(cat 2>/dev/null); code=$(read_param "$input" code); password=$(read_param "$input" password)
+				require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }
+				[ -n "$code" ] && /usr/libexec/skywifi/skywifi.sh revoke "$code" >/dev/null 2>&1 && echo '{"status":"ok"}' || echo '{"error":"revoke_failed"}'
+				;;
+			skywifi_admin_set)
+				input=$(cat 2>/dev/null); password=$(read_param "$input" password); master=$(read_param "$input" master)
+				[ -n "$password" ] || { echo '{"error":"missing_password"}'; exit 0; }
+				[ -z "$(get_hash admin)" ] || check_hash master "$master" || { echo '{"error":"master_auth_required"}'; exit 0; }
+				[ ${#password} -ge 8 ] 2>/dev/null || { echo '{"error":"weak_password"}'; exit 0; }
+				hash=$(sha256 "$password"); uci set skywifi.global.admin_password_hash="$hash"; uci commit skywifi; echo '{"status":"ok"}'
+				;;
+			skywifi_admin_check)
+				input=$(cat 2>/dev/null); password=$(read_param "$input" password); check_hash admin "$password" && echo '{"valid":true}' || echo '{"valid":false}'
+				;;
+			skywifi_master_set)
+				input=$(cat 2>/dev/null); password=$(read_param "$input" password); master=$(read_param "$input" master)
+				[ -n "$password" ] || { echo '{"error":"missing_password"}'; exit 0; }
+				[ -z "$(get_hash master)" ] || check_hash master "$master" || { echo '{"error":"master_auth_required"}'; exit 0; }
+				[ ${#password} -ge 8 ] 2>/dev/null || { echo '{"error":"weak_password"}'; exit 0; }
+				hash=$(sha256 "$password"); uci set skywifi.global.master_password_hash="$hash"; uci commit skywifi; echo '{"status":"ok"}'
+				;;
+			skywifi_master_check)
+				input=$(cat 2>/dev/null); password=$(read_param "$input" password); check_hash master "$password" && echo '{"valid":true}' || echo '{"valid":false}'
+				;;
+			skywifi_set_enabled)
+				input=$(cat 2>/dev/null); enabled=$(read_param "$input" enabled); password=$(read_param "$input" password)
+				require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }
+				if /usr/libexec/skywifi/skywifi.sh set_enabled "$enabled" >/tmp/skywifi/set_enabled.out 2>&1; then
+					/usr/libexec/skywifi/skywifi.sh status
+				else
+					echo '{"error":"portal_state_change_failed"}'
+				fi
+				;;
+			skywifi_reset)
+				input=$(cat 2>/dev/null); password=$(read_param "$input" password)
+				require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }
+				/usr/libexec/skywifi/skywifi.sh reset >/dev/null 2>&1 && echo '{"status":"ok","enabled":0}' || echo '{"error":"reset_failed"}'
+				;;
+			skywifi_device_status)
+				input=$(cat 2>/dev/null); mac=$(read_param "$input" mac); password=$(read_param "$input" password)
+				require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }
+				mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+				blocked=0
+				uci show skywifi 2>/dev/null | grep '=qos_rule' | while read -r line; do
+					sec=$(echo "$line" | cut -d= -f1 | cut -d. -f2)
+					cmac=$(uci -q get "skywifi.${sec}.mac" | tr '[:upper:]' '[:lower:]')
+					block=$(uci -q get "skywifi.${sec}.block" || echo 0)
+					[ "$cmac" = "$mac" ] && [ "$block" = "1" ] && echo 1 && exit 0
+				done > /tmp/skywifi.blockcheck.$$
+			[ "$(cat /tmp/skywifi.blockcheck.$$ 2>/dev/null)" = "1" ] && blocked=1
+			[ "$blocked" = 0 ] && {
+				if nft list table inet skywifi 2>/dev/null | grep -q "ether saddr $mac drop"; then blocked=1; fi
+			}
+			rm -f /tmp/skywifi.blockcheck.$$ 2>/dev/null || true
+			echo '{"status":"ok","mac":"'"$mac"'","blocked":'"$blocked"'}'
+				;;
+			skywifi_forget_device)
+				input=$(cat 2>/dev/null); mac=$(read_param "$input" mac); password=$(read_param "$input" password)
+				require_admin "$password" || { echo '{"error":"admin_auth_required"}'; exit 0; }
+				mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+				[ -n "$mac" ] || { echo '{"error":"missing_mac"}'; exit 0; }
+				line=$(awk -F '\\t' -v m="$mac" '$1==m{print; exit}' /etc/skywifi/devices.db 2>/dev/null)
+				TAB=$(printf '\t')
+				IFS="$TAB" read -r dmac dcid dip dname dact dexp dstatus dlast <<EOFDEV
+$line
+EOFDEV
+				[ -n "$dip" ] && . /usr/libexec/skywifi/skywifi-lib.sh && deauthorize_ip "$dip"
+			tmp="/etc/skywifi/devices.db.tmp.$$"
+			awk -F '\\t' -v m="$mac" 'BEGIN{OFS="\\t"} $1!=m{print}' /etc/skywifi/devices.db > "$tmp" && mv "$tmp" /etc/skywifi/devices.db
+			# Remove the quick-block/alias records for this device; the device
+			# may be rediscovered later and will then require a voucher again.
+			sec="quick_block_$(echo "$mac" | tr -cd 'a-zA-Z0-9')"; uci delete skywifi."$sec" 2>/dev/null || true
+			sec="alias_$(echo "$mac" | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')"; uci delete skywifi."$sec" 2>/dev/null || true
+			uci commit skywifi
+			[ -x /usr/libexec/skywifi/qos-engine.sh ] && /usr/libexec/skywifi/qos-engine.sh apply >/dev/null 2>&1 || true
+			echo '{"status":"ok"}'
+				;;
+			*)
+				echo '{"error":"method_not_found"}'
+				;;
+		esac
+		;;
+	*)
+		exit 1
+		;;
+esac
+
+exit 0

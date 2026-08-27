@@ -1,0 +1,114 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=90
+USE_PROCD=1
+
+PROG="/usr/libexec/skywifi/netmon-daemon.sh"
+ARCHIVER="/usr/libexec/skywifi/stats-archiver.sh"
+HELPER="/usr/libexec/skywifi/netmon-helper.sh"
+QOS="/usr/libexec/skywifi/qos-engine.sh"
+URLBLOCK="/usr/libexec/skywifi/urlblock-engine.sh"
+SKYWIFI="/usr/libexec/skywifi/skywifi.sh"
+SKYPORTAL="/usr/sbin/uhttpd"
+CRON_ROOT="/etc/crontabs/root"
+
+service_triggers() {
+	procd_add_reload_trigger "skywifi"
+}
+
+# OpenWrt (BusyBox crond) only reads /etc/crontabs/* - the Debian-style
+# /etc/cron.d directory is ignored. Entries are written idempotently.
+setup_cron() {
+	mkdir -p /etc/crontabs
+	touch "$CRON_ROOT" 2>/dev/null
+	chmod 600 "$CRON_ROOT" 2>/dev/null
+
+	entry1="*/5 * * * * /usr/libexec/skywifi/stats-archiver.sh check_rollover >/dev/null 2>&1"
+	entry2="0 0 * * * /usr/libexec/skywifi/stats-archiver.sh archive_daily >/dev/null 2>&1"
+	entry3="*/5 * * * * /usr/libexec/skywifi/urlblock-engine.sh refresh >/dev/null 2>&1"
+
+	append_cron() {
+		entry="$1"
+		grep -Fq "$entry" "$CRON_ROOT" 2>/dev/null || echo "$entry" >> "$CRON_ROOT"
+	}
+
+	append_cron "$entry1"
+	append_cron "$entry2"
+	append_cron "$entry3"
+	# Remove legacy cron.d file if present
+	rm -f /etc/cron.d/skywifi 2>/dev/null || true
+
+	( /etc/init.d/cron restart >/dev/null 2>&1 || true ) &
+}
+
+start_service() {
+	ENABLED=$(uci -q get skywifi.global.enabled || echo "1")
+	[ "$ENABLED" = "1" ] || return 0
+
+	# Restore previous statistics from persistent storage into RAM asynchronously
+	[ -x "$ARCHIVER" ] && { ( timeout 30 "$ARCHIVER" restore >/dev/null 2>&1 || true ) & }
+
+	# Set up cron rollover schedule (OpenWrt crontabs)
+	setup_cron
+
+	# Captive portal is optional. LuCI remains on the normal uhttpd instance.
+	# The portal gets its own uhttpd listener. Its index and error handler are
+	# the Sky Wifi CGI, never /www/index.html (which redirects to LuCI).
+	if [ "$(uci -q get skywifi.global.portal_enabled || echo 0)" = "1" ] && [ -x "$SKYWIFI" ] && [ -x "$SKYPORTAL" ]; then
+		[ -f /www/cgi-bin/skywifi/portal ] && chmod 755 /www/cgi-bin/skywifi/portal 2>/dev/null || true
+		[ -f /www/cgi-bin/skywifi/terms ] && chmod 755 /www/cgi-bin/skywifi/terms 2>/dev/null || true
+		"$SKYWIFI" setup >/dev/null 2>&1 || true
+		procd_open_instance skyportal
+		procd_set_param command "$SKYPORTAL" -f -h /www -x /cgi-bin -I cgi-bin/skywifi/portal -E /cgi-bin/skywifi/portal -p "$(uci -q get skywifi.global.portal_ip || echo 192.168.1.1):$(uci -q get skywifi.global.portal_port || echo 8080)" -t 30 -T 10
+		procd_set_param respawn 3600 5 5
+		procd_close_instance
+		if [ -x /usr/libexec/skywifi/reconcile-loop.sh ]; then
+			procd_open_instance skyreconcile
+			procd_set_param command /usr/libexec/skywifi/reconcile-loop.sh
+			procd_set_param respawn 3600 5 5
+			procd_close_instance
+		fi
+	fi
+
+	# Apply QoS / Blocker rules asynchronously so boot and config-change
+	# reloads (LuCI "uci/apply") never block on nftables/dnsmasq/domain
+	# resolution. Without this, slow DNS lookups during a reload can stall
+	# the apply RPC until it fails with "ubus code 5: No data received".
+	(
+		sleep 1
+		[ -x "$QOS" ]      && timeout 20 "$QOS" apply >/dev/null 2>&1 || true
+		[ -x "$URLBLOCK" ] && timeout 30 "$URLBLOCK" apply >/dev/null 2>&1 || true
+	) &
+
+	procd_open_instance
+	procd_set_param command "$PROG"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	# Flush RAM stats to persistent storage before stopping
+	SYNC_SHUTDOWN=$(uci -q get skywifi.global.sync_on_shutdown || echo "1")
+	if [ "$SYNC_SHUTDOWN" = "1" ] || [ "$SYNC_SHUTDOWN" = "true" ] || [ "$SYNC_SHUTDOWN" = "yes" ]; then
+		[ -x "$HELPER" ] && { timeout 30 "$HELPER" sync >/dev/null 2>&1 || true; }
+		[ -x "$ARCHIVER" ] && { timeout 30 "$ARCHIVER" sync >/dev/null 2>&1 || true; }
+	fi
+	# Clean up nftables QoS rules and Website Blocker rules on stop
+	[ -x "$QOS" ]      && { timeout 10 "$QOS" clean >/dev/null 2>&1 || true; }
+	[ -x "$URLBLOCK" ] && { timeout 10 "$URLBLOCK" clean >/dev/null 2>&1 || true; }
+	[ -x "$SKYWIFI" ] && "$SKYWIFI" stop >/dev/null 2>&1 || true
+}
+
+shutdown() {
+	stop_service
+}
+
+reload_service() {
+	# Config changes (especially portal ON/OFF) must rebuild procd instances
+	# and the nftables portal table. A deterministic restart avoids stale
+	# listeners/rules surviving a LuCI Save & Apply.
+	/etc/init.d/skywifi restart >/dev/null 2>&1 || true
+}

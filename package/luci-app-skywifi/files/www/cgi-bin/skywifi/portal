@@ -1,0 +1,145 @@
+#!/bin/sh
+. /usr/libexec/skywifi/skywifi-lib.sh
+
+printf 'Content-Type: text/html; charset=UTF-8\r\nCache-Control: no-store\r\n\r\n'
+
+html_escape() {
+	printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&#39;/g'
+}
+url_decode() {
+	v=$(printf '%s' "$1" | tr '+' ' ')
+	# Decode the common form characters without requiring a heavy runtime.
+	v=$(printf '%s' "$v" | sed -e 's/%20/ /g' -e 's/%2B/+/g' -e 's/%2F#PLACEHOLDER#/\//g' -e 's/%3A/:/g' -e 's/%2D/-/g' -e 's/%5F/_/g')
+	printf '%s' "$v"
+}
+param() {
+	key="$1"; data="$QUERY_STRING"
+	[ "$REQUEST_METHOD" = POST ] && data=$(cat 2>/dev/null)
+	printf '%s' "$data" | tr '&' '\n' | awk -F= -v k="$key" '$1==k{print substr($0,index($0,"=")+1); exit}'
+}
+
+IP=${REMOTE_ADDR:-}
+MAC=$(client_mac "$IP" 2>/dev/null | head -n1)
+MAC=$(normalize_mac "$MAC")
+
+# Preserve the HTTP destination that triggered the captive portal. After a
+# successful voucher activation, return the client to that destination rather
+# than to LuCI. Never redirect a user to the router's own address.
+ORIGINAL_URL=''
+case "${HTTP_HOST:-}" in
+	''|192.168.1.1|192.168.1.1:8080) ;;
+	*)
+		case "${REQUEST_URI:-/}" in
+			/*) ORIGINAL_URL="http://${HTTP_HOST}${REQUEST_URI}" ;;
+		esac
+		;;
+esac
+
+cid=$(find_customer_by_device "$MAC" 2>/dev/null)
+device=$(find_device "$MAC" 2>/dev/null)
+known=0
+expired=0
+if [ -n "$device" ]; then
+	known=1
+	TAB=$(printf '\t')
+	IFS="$TAB" read -r dmac dcid dip dname dact dexp dstatus dlast <<EOF2
+$device
+EOF2
+	if [ "$dstatus" = BLOCKED ]; then
+		cat <<HTML
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sky Wifi</title></head><body style="font-family:system-ui;background:#f4f7fb;padding:24px"><div style="max-width:430px;margin:10vh auto;background:#fff;padding:28px;border-radius:22px;text-align:center;box-shadow:0 12px 40px #0001"><h2>Access blocked</h2><p style="color:#64748b">Please contact Sky Wifi support.</p><b>01650121954</b></div></body></html>
+HTML
+		exit 0
+	fi
+	if [ -n "$dexp" ] && [ "$dexp" -gt 0 ] 2>/dev/null && [ "$dexp" -le "$(now)" ] 2>/dev/null; then expired=1; fi
+fi
+
+if [ "$REQUEST_METHOD" = POST ]; then
+	voucher=$(url_decode "$(param voucher)")
+	name=$(url_decode "$(param name)")
+	mobile=$(url_decode "$(param mobile)")
+	voucher=$(printf '%s' "$voucher" | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z0-9-')
+	name=$(clean_field "$name")
+	mobile=$(printf '%s' "$mobile" | tr -cd '0-9+ ' | cut -c1-20)
+	# Voucher activation is a single atomic operation from the portal's point
+	# of view. This prevents two clients racing on the same UNUSED voucher and
+	# both becoming authorized. The first successful activation permanently
+	# binds the voucher to that observed Wi-Fi client MAC until expiry/revoke.
+	if ! lock_acquire; then
+		error='Activation is busy. Please try again.'
+	else
+		line=$(voucher_get "$voucher")
+		state=$(voucher_state "$line")
+		if [ -z "$line" ]; then
+			error='Invalid voucher code.'
+		elif [ "$state" != UNUSED ]; then
+			error='This voucher is already activated, expired, or revoked.'
+		else
+		TAB=$(printf '\t')
+		IFS="$TAB" read -r vcode vstatus vcreated vplan vactivated vexpires vcustomer vdevice <<EOF2
+$line
+EOF2
+		if [ "$known" -eq 1 ]; then
+			cid="$dcid"
+			cust=$(customer_line "$cid")
+			TAB=$(printf '\t')
+				IFS="$TAB" read -r ccid cname cmobile ccreated <<EOF2
+$cust
+EOF2
+			name="$cname"; mobile="$cmobile"
+		else
+			cid="C$(random_code | cut -c1-10 | tr 'a-f' 'A-F')"
+			upsert_customer "$cid" "$name" "$mobile" "$(now)"
+		fi
+		if [ -z "$error" ]; then
+			activated=$(now); if [ "$vplan" = lifetime ]; then expires=0; else expires=$((activated + DAYS*86400)); fi
+			if [ -z "$MAC" ] || ! valid_mac "$MAC" || [ -z "$IP" ] || ! valid_ip "$IP"; then
+				error='Could not identify this device. Please reconnect to Wi-Fi and try again.'
+			else
+				set_voucher_active "$voucher" "$activated" "$expires" "$cid" "$MAC" || error='Activation could not be saved. Please try again.'
+				if [ -z "$error" ]; then
+					upsert_device "$MAC" "$cid" "$IP" "$name" "$activated" "$expires" ACTIVE
+					if [ "$vplan" = lifetime ]; then authorize_ip "$IP" lifetime; else authorize_ip "$IP"; fi
+					log_event "ACTIVATE voucher=$voucher mac=$MAC ip=$IP customer=$cid expires=$expires"
+				fi
+			fi
+		fi
+		fi
+		lock_release
+	fi
+	if [ -z "$error" ]; then
+		cat <<HTML
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sky Wifi</title><meta http-equiv="refresh" content="2;url=$(html_escape "${ORIGINAL_URL:-http://connectivitycheck.gstatic.com/generate_204}")"></head><body style="margin:0;font-family:system-ui,-apple-system,Segoe UI;background:linear-gradient(145deg,#eef4ff,#f8fbff);padding:20px"><div style="max-width:430px;margin:9vh auto;background:#fff;padding:32px;border-radius:26px;text-align:center;box-shadow:0 18px 55px #0b4f9c18"><div style="font-size:38px">✓</div><h2 style="margin:8px 0">Welcome to Sky Wifi</h2><p style="color:#64748b">$( [ "$vplan" = lifetime ] && echo 'Your internet access is active with a lifetime voucher.' || echo 'Your internet access is active for 30 days.' )</p>$( if [ "$vplan" = lifetime ]; then printf '<div style="padding:14px;background:#f1f7ff;border-radius:14px;margin-top:18px">Validity: <b>Lifetime</b></div>'; else printf '<div style="padding:14px;background:#f1f7ff;border-radius:14px;margin-top:18px">Expires: <b>%s</b></div>' "$(date -d "@$expires" '+%d %b %Y' 2>/dev/null || date -r "$expires" '+%d %b %Y' 2>/dev/null || echo '30 days from activation')"; fi )<p style="font-size:12px;color:#94a3b8;margin-top:22px">Sky Wifi • Support 01650121954</p></div></body></html>
+HTML
+		exit 0
+	fi
+fi
+
+if [ "$known" -eq 1 ] && [ "$expired" -eq 1 ]; then
+	title='Renew your Sky Wifi'
+	sub='Your previous access has expired. Enter a new voucher to renew.'
+	show_identity=0
+else
+	title='Welcome to Sky Wifi'
+	sub='Connect once, then your device will be remembered automatically.'
+	show_identity=1
+fi
+
+cat <<HTML
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#1769e0"><title>Sky Wifi</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(145deg,#edf5ff,#f8fbff);color:#122033;display:flex;align-items:center;justify-content:center;padding:18px}.wrap{width:100%;max-width:430px}.brand{text-align:center;margin-bottom:18px}.logo{width:62px;height:62px;border-radius:19px;background:linear-gradient(145deg,#1683ff,#1455d9);display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:25px;box-shadow:0 12px 28px #1464df30}.brand h1{margin:12px 0 3px;font-size:25px}.brand p{margin:0;color:#718096;font-size:13px}.card{background:#fff;border:1px solid #e5edf8;border-radius:25px;padding:24px;box-shadow:0 18px 55px #123b6d12}.status{background:#f1f7ff;border-radius:14px;padding:12px 14px;color:#3d5f84;font-size:13px;margin-bottom:18px}.field{margin:13px 0}.field label{display:block;font-size:12px;font-weight:800;color:#425466;margin-bottom:7px}.field input{width:100%;height:48px;border:1.5px solid #dce5f0;border-radius:13px;padding:0 14px;font-size:15px;outline:0;background:#fbfdff}.field input:focus{border-color:#3987ed;box-shadow:0 0 0 3px #3987ed18}.btn{width:100%;height:50px;border:0;border-radius:14px;background:linear-gradient(135deg,#1b7df0,#1557d7);color:#fff;font-size:15px;font-weight:850;margin-top:8px;box-shadow:0 10px 24px #1769e028}.error{background:#fff1f1;color:#b42318;border-radius:13px;padding:12px;font-size:13px;margin-bottom:14px}.terms{text-align:center;color:#8a99aa;font-size:11px;line-height:1.6;margin:16px 4px 0}.footer{text-align:center;color:#8796a8;font-size:11px;margin-top:15px}.help{color:#1769e0;font-weight:800}
+</style></head><body><main class="wrap"><div class="brand"><div class="logo">S</div><h1>Sky Wifi</h1><p>Fast • Simple • Connected</p></div><section class="card"><div class="status">🔒 Secure access • 30-day or lifetime voucher</div><h2 style="font-size:20px;margin:0 0 6px">$(html_escape "$title")</h2><p style="margin:0 0 18px;color:#718096;font-size:13px">$(html_escape "$sub")</p>
+HTML
+[ -n "$error" ] && printf '<div class="error">%s</div>\n' "$(html_escape "$error")"
+printf '<form method="post" autocomplete="off">\n'
+if [ "$show_identity" -eq 1 ]; then
+	printf '<div class="field"><label>Name <span style="font-weight:500;color:#94a3b8">(Optional)</span></label><input name="name" placeholder="Your name (optional)" maxlength="60"></div>\n'
+	printf '<div class="field"><label>Mobile Number <span style="font-weight:500;color:#94a3b8">(Optional)</span></label><input name="mobile" inputmode="tel" placeholder="01XXXXXXXXX (optional)" maxlength="20"></div>\n'
+fi
+printf '<div class="field"><label>Voucher Code</label><input name="voucher" placeholder="SKY-XXXX-XXXX" maxlength="40" autocapitalize="characters" required></div>\n'
+printf '<button class="btn" type="submit">%s</button></form>' "$( [ "$show_identity" -eq 1 ] && echo 'Activate Internet' || echo 'Renew Internet' )"
+cat <<HTML
+</section><div class="terms">By continuing, you agree to Sky Wifi Terms & Conditions.<br>Need help? <span class="help">01650121954</span></div><div class="footer">Sky Wifi • Yeasin Arafat</div></main></body></html>
+HTML

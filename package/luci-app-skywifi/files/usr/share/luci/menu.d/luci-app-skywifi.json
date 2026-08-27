@@ -1,0 +1,93 @@
+{
+  "admin/network/skywifi": {
+    "title": "Sky Wifi",
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-skywifi"
+      ]
+    }
+  },
+  "admin/network/skywifi/vouchers": {
+    "title": "Voucher Manager",
+    "order": 2,
+    "action": {
+      "type": "view",
+      "path": "skywifi/vouchers"
+    }
+  },
+  "admin/network/skywifi/dashboard": {
+    "title": "Dashboard",
+    "order": 3,
+    "action": {
+      "type": "view",
+      "path": "skywifi/dashboard"
+    }
+  },
+  "admin/network/skywifi/qos": {
+    "title": "QoS Manager",
+    "order": 4,
+    "action": {
+      "type": "view",
+      "path": "skywifi/qos"
+    }
+  },
+  "admin/network/skywifi/blocker": {
+    "title": "Website Blocker",
+    "order": 5,
+    "action": {
+      "type": "view",
+      "path": "skywifi/blocker"
+    }
+  },
+  "admin/network/skywifi/upstreams": {
+    "title": "Upstreams",
+    "order": 6,
+    "action": {
+      "type": "view",
+      "path": "skywifi/upstreams"
+    }
+  },
+  "admin/network/skywifi/history": {
+    "title": "Traffic History",
+    "order": 7,
+    "action": {
+      "type": "view",
+      "path": "skywifi/history"
+    }
+  },
+  "admin/network/skywifi/admin": {
+    "title": "Admin Panel",
+    "order": 8,
+    "action": {
+      "type": "view",
+      "path": "skywifi/admin"
+    }
+  },
+  "admin/network/skywifi/settings": {
+    "title": "Settings",
+    "order": 9,
+    "action": {
+      "type": "view",
+      "path": "skywifi/settings"
+    }
+  },
+  "admin/network/skywifi/about": {
+    "title": "About",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "skywifi/about"
+    }
+  },
+  "admin/network/skywifi/skywifi": {
+    "title": "Sky Wifi",
+    "order": 1,
+    "action": {
+      "type": "view",
+      "path": "skywifi/dashboard"
+    }
+  }
+}
